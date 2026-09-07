@@ -894,6 +894,115 @@ class Test_Diff_Marginal(Algorithm):
     of X differ between the two groups.
     """
     
+    @staticmethod
+    def _build_conditional_sampler(e: np.ndarray, n_p: int):
+        """
+        Precompute quantities needed to sample labels T conditional on
+
+            sum(T) = n_p
+
+        when T_i ~ Bernoulli(e_i) before conditioning.
+
+        Returns
+        -------
+        log_w : (N,) array
+            Log propensity odds.
+        log_dp : (N + 1, n_p + 1) array
+            Dynamic-programming table.
+        """
+        e = np.asarray(e, dtype=float).reshape(-1)
+
+        if np.any(e <= 0.0) or np.any(e >= 1.0):
+            raise ValueError(
+                "Propensity scores must lie strictly between 0 and 1."
+            )
+
+        N = len(e)
+
+        if not 0 <= n_p <= N:
+            raise ValueError("n_p must lie between 0 and N.")
+
+        # log(e_i / (1 - e_i))
+        log_w = np.log(e) - np.log1p(-e)
+
+        # log_dp[i, k] =
+        # log(sum of product of odds over all subsets of size k chosen from observations i, ..., N-1)
+        log_dp = np.full((N + 1, n_p + 1), -np.inf)
+        log_dp[N, 0] = 0.0
+
+        for i in range(N - 1, -1, -1):
+            log_dp[i, 0] = 0.0
+
+            max_k = min(n_p, N - i)
+
+            # Vectorised version of
+            # dp[i,k] = dp[i+1,k] + w_i dp[i+1,k-1]
+            # on the log scale.
+            log_dp[i, 1:max_k + 1] = np.logaddexp(
+                log_dp[i + 1, 1:max_k + 1],
+                log_w[i] + log_dp[i + 1, :max_k],
+            )
+
+        return log_w, log_dp
+
+    @staticmethod
+    def _sample_conditional_labels_batch(
+        log_w: np.ndarray,
+        log_dp: np.ndarray,
+        n_p: int,
+        B: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """
+        Generate B conditional label assignments at once.
+
+        Returns
+        -------
+        labels : (B, N) boolean array
+            Each row contains exactly n_p True entries.
+        """
+        N = len(log_w)
+
+        labels = np.zeros((B, N), dtype=bool)
+        remaining = np.full(B, n_p, dtype=int)
+
+        for i in range(N):
+
+            # Some replicates may have reached the point where every
+            # remaining observation must be selected.
+            must_take = remaining == (N - i)
+
+            if np.any(must_take):
+                labels[must_take, i:] = True
+                remaining[must_take] = 0
+
+            active = remaining > 0
+
+            if not np.any(active):
+                break
+
+            active_idx = np.flatnonzero(active)
+            r = remaining[active_idx]
+
+            # Conditional probability of assigning observation i to P:
+            # P(T_i = 1 | need r more assignments)
+            log_p = (
+                log_w[i]
+                + log_dp[i + 1, r - 1]
+                - log_dp[i, r]
+            )
+
+            p = np.exp(log_p)
+            p = np.clip(p, 0.0, 1.0)
+
+            selected = rng.random(len(active_idx)) < p
+            selected_idx = active_idx[selected]
+
+            labels[selected_idx, i] = True
+            remaining[selected_idx] -= 1
+
+        return labels
+
     def test(
         self,
         X_P: np.ndarray,
@@ -906,26 +1015,40 @@ class Test_Diff_Marginal(Algorithm):
         algo_kwargs: dict | None = None,
         stat_kwargs: dict | None = None
     ) -> Tuple[float, float]:
-        """
-        Kernel two-sample test for conditional distribution (P_X != Q_X).
-        """
+
         if kernel_y is None:
             kernel_y = kernel_x
-        
+
         algo_kwargs = algo_kwargs or {}
         stat_kwargs = stat_kwargs or {}
 
-        alpha = float(algo_kwargs.get("alpha", 0.05))
+        # This alpha is the significance level, not the mixture parameter.
+        significance_level = float(algo_kwargs.get("alpha", 0.05))
+
         B = int(algo_kwargs.get("B", 1000))
-        lam_p = float(algo_kwargs.get("lam_p", algo_kwargs.get("lam", 1e-3)))
-        lam_q = float(algo_kwargs.get("lam_q", algo_kwargs.get("lam", 1e-3)))
+
+        lam_p = float(
+            algo_kwargs.get("lam_p", algo_kwargs.get("lam", 1e-3))
+        )
+        lam_q = float(
+            algo_kwargs.get("lam_q", algo_kwargs.get("lam", 1e-3))
+        )
+
         propensity_fn = algo_kwargs.get("propensity_fn", None)
-        rng = np.random.default_rng(algo_kwargs.get("random_state", None))
+
+        rng = np.random.default_rng(
+            algo_kwargs.get("random_state", None)
+        )
 
         if propensity_fn is None:
-            raise ValueError("propensity_fn must be provided for Test_Diff_Marginal")
+            raise ValueError(
+                "propensity_fn must be provided for Test_Diff_Marginal"
+            )
 
-        # Compute test statistic on original data
+        # ------------------------------------------------------------
+        # Original test statistic
+        # ------------------------------------------------------------
+
         stat = test_statistic.compute(
             X_P,
             Y,
@@ -940,77 +1063,85 @@ class Test_Diff_Marginal(Algorithm):
 
         n = X_P.shape[0]
         m = X_Q.shape[0]
+        N = n + m
 
-        # Bootstrap with propensity score resampling
-        stats_boot = np.zeros(B, dtype=float)
-        
-        # Compute propensity scores
-        e_P = propensity_fn(X_P.flatten())  # P(group=P | X_P)
-        e_Q = propensity_fn(X_Q.flatten())  # P(group=P | X_Q)
-        
+        # ------------------------------------------------------------
+        # Pool data
+        # ------------------------------------------------------------
+
+        X_all = np.concatenate([X_P, X_Q], axis=0)
+        W_all = np.concatenate([Y, Z], axis=0)
+
+        if X_all.ndim == 2 and X_all.shape[1] == 1:
+            propensity_input = X_all[:, 0]
+        else:
+            propensity_input = X_all
+
+        e_all = np.asarray(
+            propensity_fn(propensity_input),
+            dtype=float,
+        ).reshape(-1)
+
+        if len(e_all) != N:
+            raise ValueError(
+                "propensity_fn must return one propensity per observation."
+            )
+
+        # ------------------------------------------------------------
+        # PRECOMPUTE conditional resampling distribution ONCE
+        # ------------------------------------------------------------
+
+        log_w, log_dp = self._build_conditional_sampler(
+            e=e_all,
+            n_p=n,
+        )
+
+        # ------------------------------------------------------------
+        # Generate all B label assignments
+        # ------------------------------------------------------------
+
+        labels_boot = self._sample_conditional_labels_batch(
+            log_w=log_w,
+            log_dp=log_dp,
+            n_p=n,
+            B=B,
+            rng=rng,
+        )
+
+        # ------------------------------------------------------------
+        # Calculate test statistics
+        # ------------------------------------------------------------
+
+        stats_boot = np.empty(B, dtype=float)
+
         for b in range(B):
-            # Initialize empty lists for bootstrap samples
-            X_P_b_list = []
-            Y_b_list = []
-            X_Q_b_list = []
-            Z_b_list = []
-            
-            # Resample from P using propensity scores
-            for i in range(n):
-                t_i = rng.binomial(1, e_P[i])  # Bernoulli(e(x_i))
-                if t_i == 1:
-                    X_P_b_list.append(X_P[i])
-                    Y_b_list.append(Y[i])
-                else:
-                    X_Q_b_list.append(X_P[i])
-                    Z_b_list.append(Y[i])
-            
-            # Resample from Q using propensity scores
-            for j in range(m):
-                t_j = rng.binomial(1, e_Q[j])  # Bernoulli(e(x_j'))
-                if t_j == 1:
-                    X_P_b_list.append(X_Q[j])
-                    Y_b_list.append(Z[j])
-                else:
-                    X_Q_b_list.append(X_Q[j])
-                    Z_b_list.append(Z[j])
-            
-            # Only compute statistic if both groups have at least one sample
-            if len(X_P_b_list) > 0 and len(X_Q_b_list) > 0:
-                X_P_b = np.array(X_P_b_list)
-                Y_b = np.array(Y_b_list)
-                X_Q_b = np.array(X_Q_b_list)
-                Z_b = np.array(Z_b_list)
-                
-                # Reshape if needed (ensure 2D)
-                if X_P_b.ndim == 1:
-                    X_P_b = X_P_b.reshape(-1, 1)
-                if Y_b.ndim == 1:
-                    Y_b = Y_b.reshape(-1, 1)
-                if X_Q_b.ndim == 1:
-                    X_Q_b = X_Q_b.reshape(-1, 1)
-                if Z_b.ndim == 1:
-                    Z_b = Z_b.reshape(-1, 1)
-                
-                stats_boot[b] = test_statistic.compute(
-                    X_P_b,
-                    Y_b,
-                    X_Q_b,
-                    Z_b,
-                    lam_p,
-                    lam_q,
-                    kernel_x,
-                    kernel_y,
-                    **stat_kwargs,
-                )
-            else:
-                # If one group is empty after resampling, assign a neutral value.
-                stats_boot[b] = 0.0
 
-        p_value = (1.0 + np.sum(stats_boot > stat)) / (1.0 + B)
+            labels_p = labels_boot[b]
+            labels_q = ~labels_p
 
-        # Decision is p_value < alpha (not returned, but computed for callers)
-        _ = p_value < alpha
+            X_P_b = X_all[labels_p]
+            Y_b = W_all[labels_p]
+
+            X_Q_b = X_all[labels_q]
+            Z_b = W_all[labels_q]
+
+            stats_boot[b] = test_statistic.compute(
+                X_P_b,
+                Y_b,
+                X_Q_b,
+                Z_b,
+                lam_p,
+                lam_q,
+                kernel_x,
+                kernel_y,
+                **stat_kwargs,
+            )
+
+        p_value = (
+            1.0 + np.sum(stats_boot >= stat)
+        ) / (B + 1.0)
+
+        _ = p_value < significance_level
 
         return float(stat), float(p_value)
 
