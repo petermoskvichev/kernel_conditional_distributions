@@ -13,7 +13,14 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 sys.path.insert(0, project_root)
 
-from src.cmmd import CMMD0, CMMD1, CMMD2, CMMD0_dr, CMMD1_dr, CMMD2_dr, Test_Diff_Marginal
+from src.cmmd import CMMD0, CMMD1, CMMD2, Test_Diff_Marginal
+from src.dr_cmmd import (
+	CMMD0_dr,
+	CMMD1_dr,
+	CMMD2_dr,
+	CrossFittedDREstimator,
+	polynomial_features,
+)
 from src.kernels import polynomial_kernel, linear_kernel
 from src.dr_models import sample_joint, sample_covariate_p, sample_covariate_q, conditional_y, conditional_z, propensity
 from sklearn.kernel_ridge import KernelRidge
@@ -25,6 +32,7 @@ def run_power_experiment(
 	n_trials: int = 250,
 	alpha: float = 0.05,
 	B: int = 250,
+	nfolds: int = 5,
 	seed: int = 42
 ) -> dict[str, np.ndarray]:
 	"""
@@ -33,10 +41,6 @@ def run_power_experiment(
 	cmmd0_stat = CMMD0()
 	cmmd1_stat = CMMD1()
 	cmmd2_stat = CMMD2()
-
-	cmmd0_stat_dr = CMMD0_dr()
-	cmmd1_stat_dr = CMMD1_dr()
-	cmmd2_stat_dr = CMMD2_dr()
 	
 	algo = Test_Diff_Marginal()
 
@@ -78,50 +82,35 @@ def run_power_experiment(
 			X_Q = X_Q.reshape(-1, 1)
 			Z = Z.reshape(-1, 1)
 
-			# Fit KRR models for DR estimation
 			alpha_grid = {"alpha": np.logspace(-4, 1, 5)}
-			krr_y = GridSearchCV(
-				KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
-				alpha_grid, cv=5)
-			krr_y.fit(X_P, Y.flatten())
-			
-			krr_z = GridSearchCV(KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1), alpha_grid, cv=5)
-			krr_z.fit(X_Q, Z.flatten())
 
-			alpha_p = float(krr_y.best_params_["alpha"])
-			alpha_q = float(krr_z.best_params_["alpha"])
+			# Select regularization for the standard statistics using the full data.
+			krr_y_standard = GridSearchCV(
+				KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
+				alpha_grid, cv=min(5, n))
+			krr_y_standard.fit(X_P, Y.flatten())
+
+			krr_z_standard = GridSearchCV(
+				KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
+				alpha_grid, cv=min(5, n))
+			krr_z_standard.fit(X_Q, Z.flatten())
+
+			alpha_p = float(krr_y_standard.best_params_["alpha"])
+			alpha_q = float(krr_z_standard.best_params_["alpha"])
 			lam_p = alpha_p / X_P.shape[0]
 			lam_q = alpha_q / X_Q.shape[0]
 
-			# Build pooled pseudo-outcomes, then tune KRR regularization for DR lambda.
-			X_train = np.concatenate([X_P, X_Q], axis=0)
-			YZ_train = np.concatenate([Y.flatten(), Z.flatten()])
-			T_train = np.concatenate([
-				np.ones(X_P.shape[0], dtype=float),
-				np.zeros(X_Q.shape[0], dtype=float),
-			])
-			E_train = propensity(X_train.flatten())
-
-			mu_y_train = krr_y.predict(X_train)
-			mu_z_train = krr_z.predict(X_train)
-			pseudo_outcome_train = (T_train - E_train) / (E_train * (1 - E_train)) * (
-				YZ_train - (1 - E_train) * mu_y_train - E_train * mu_z_train
+			# Share cross-fitted nuisance and DR operator fits across CMMD levels.
+			# Test_Diff_Marginal calls compute again for every resampled label vector,
+			# so the complete cross-fitting pipeline is rerun under resampling.
+			shared_dr_stats = CrossFittedDREstimator(
+				n_folds=nfolds,
+				random_state=trial * 2 + 2,
+				feature_map=polynomial_features,
 			)
-
-			krr_dr = GridSearchCV(
-				KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
-				alpha_grid, cv=5,
-			)
-			krr_dr.fit(X_train, pseudo_outcome_train)
-			alpha_dr = float(krr_dr.best_params_["alpha"])
-			lam_dr = alpha_dr / X_train.shape[0]
-			
-			# Create callable model functions
-			def cme_y(X):
-				return krr_y.predict(X.reshape(-1, 1) if X.ndim == 1 else X)
-			
-			def cme_z(X):
-				return krr_z.predict(X.reshape(-1, 1) if X.ndim == 1 else X)
+			cmmd0_stat_dr = CMMD0_dr(shared_estimator=shared_dr_stats)
+			cmmd1_stat_dr = CMMD1_dr(shared_estimator=shared_dr_stats)
+			cmmd2_stat_dr = CMMD2_dr(shared_estimator=shared_dr_stats)
 
 			# Prepare kwargs for test method
 			algo_kwargs = {
@@ -134,9 +123,6 @@ def run_power_experiment(
 			}
 			algo_kwargs_dr = {
 				**algo_kwargs,
-				"lam_p": lam_dr,
-				"lam_q": lam_dr,
-				"propensity_fn": propensity,
 			}
 			
 			stat_kwargs = {}
@@ -172,23 +158,23 @@ def run_power_experiment(
 				polynomial_kernel,
 				linear_kernel,
 				algo_kwargs=algo_kwargs_dr,
-				stat_kwargs={**stat_kwargs, "propensity": propensity, "cme_y": cme_y, "cme_z": cme_z},
+				stat_kwargs={**stat_kwargs, "propensity": propensity},
 			)
 			_, p1_dr = algo.test(
 				X_P, Y, X_Q, Z,
 				cmmd1_stat_dr,
 				polynomial_kernel,
 				linear_kernel,
-				algo_kwargs={**algo_kwargs_dr, "random_state": seed_perm + 1},
-				stat_kwargs={**stat_kwargs, "propensity": propensity, "cme_y": cme_y, "cme_z": cme_z},
+				algo_kwargs=algo_kwargs_dr,
+				stat_kwargs={**stat_kwargs, "propensity": propensity},
 			)
 			_, p2_dr = algo.test(
 				X_P, Y, X_Q, Z,
 				cmmd2_stat_dr,
 				polynomial_kernel,
 				linear_kernel,
-				algo_kwargs={**algo_kwargs_dr, "random_state": seed_perm + 2},
-				stat_kwargs={**stat_kwargs, "propensity": propensity, "cme_y": cme_y, "cme_z": cme_z},
+				algo_kwargs=algo_kwargs_dr,
+				stat_kwargs={**stat_kwargs, "propensity": propensity},
 			)
 
 			# Update rejection counts for standard and DR tests
@@ -295,6 +281,7 @@ if __name__ == "__main__":
 		alpha=0.05,
 		B=200,
 		seed=42,
+		nfolds=5,
 	)
 
 	fig, _ = plot_power_vs_sample_size(sample_sizes, results, error=error)

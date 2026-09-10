@@ -16,7 +16,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 sys.path.insert(0, project_root)
 
-from src.cmmd import CMMD1, CMMD1_dr
+from src.cmmd import CMMD1
+from src.dr_cmmd import CMMD1_dr, polynomial_features
 from src.kernels import polynomial_kernel, linear_kernel
 from src.dr_models import (
 	sample_joint,
@@ -74,6 +75,7 @@ def true_cmmd(n_samples: int = 2000) -> float:
 
 def compute_cmmd1_estimates(
 	n_samples: int,
+	n_folds: int,
 	seed: int
 ) -> Tuple[float, float]:
 	"""
@@ -81,7 +83,11 @@ def compute_cmmd1_estimates(
 	"""
 
 	cmmd1_standard_stat = CMMD1()
-	cmmd1_dr_stat = CMMD1_dr()
+	cmmd1_dr_stat = CMMD1_dr(
+		n_folds=n_folds,
+		random_state=seed + 2,
+		feature_map=polynomial_features,
+	)
 
 	X_P, Y = sample_joint(n_samples, sample_covariate_p, conditional_y, seed=seed)
 	X_Q, Z = sample_joint(n_samples, sample_covariate_q, conditional_z, seed=seed + 1)
@@ -92,14 +98,16 @@ def compute_cmmd1_estimates(
 	X_Q = X_Q.reshape(-1, 1)
 	Z = Z.reshape(-1, 1)
 	
-    # Fit KRR models for DR estimation
+	# Tune regularization for the standard estimator.
 	alpha_grid = {"alpha": np.logspace(-4, 1, 5)}
 	krr_y = GridSearchCV(
 		KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
 		alpha_grid, cv=5)
 	krr_y.fit(X_P, Y.flatten())
 
-	krr_z = GridSearchCV(KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1), alpha_grid, cv=5)
+	krr_z = GridSearchCV(
+		KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
+		alpha_grid, cv=5)
 	krr_z.fit(X_Q, Z.flatten())
 
 	alpha_p = float(krr_y.best_params_["alpha"])
@@ -114,44 +122,12 @@ def compute_cmmd1_estimates(
 		linear_kernel
 	)
 
-	# Build pooled pseudo-outcomes, then tune KRR regularization for DR lambda.
-	X_train = np.concatenate([X_P, X_Q], axis=0)
-	YZ_train = np.concatenate([Y.flatten(), Z.flatten()])
-	T_train = np.concatenate([
-		np.ones(X_P.shape[0], dtype=float),
-		np.zeros(X_Q.shape[0], dtype=float),
-	])
-	E_train = propensity(X_train.flatten())
-
-	mu_y_train = krr_y.predict(X_train)
-	mu_z_train = krr_z.predict(X_train)
-	pseudo_outcome_train = (T_train - E_train) / (E_train * (1 - E_train)) * (
-		YZ_train - (1 - E_train) * mu_y_train - E_train * mu_z_train
-	)
-
-	krr_dr = GridSearchCV(
-		KernelRidge(kernel='polynomial', degree=2, coef0=1, gamma=1),
-		alpha_grid, cv=5,
-	)
-	krr_dr.fit(X_train, pseudo_outcome_train)
-	alpha_dr = float(krr_dr.best_params_["alpha"])
-	lam_dr = alpha_dr / X_train.shape[0]
-
-	# Create callable model functions
-	def cme_y(X):
-		return krr_y.predict(X.reshape(-1, 1) if X.ndim == 1 else X)
-
-	def cme_z(X):
-		return krr_z.predict(X.reshape(-1, 1) if X.ndim == 1 else X)
-	
-	stat_kwargs={"propensity": propensity, "cme_y": cme_y, "cme_z": cme_z}
-
 	stat_dr = cmmd1_dr_stat.compute(
 		X_P, Y, X_Q, Z,
-		lam_dr, lam_dr,
+		lam_p, lam_q,
 		polynomial_kernel,
 		linear_kernel,
-		**stat_kwargs,
+		propensity=propensity,
 	)
 
 	return stat_standard, stat_dr
@@ -160,6 +136,7 @@ def compute_cmmd1_estimates(
 def run_error_experiment(
 	sample_sizes: np.ndarray,
 	n_trials: int,
+	n_folds: int,
 	true_samples: int = 2000,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 	"""
@@ -183,6 +160,7 @@ def run_error_experiment(
 		for trial in range(n_trials):
 			stat_standard, stat_dr = compute_cmmd1_estimates(
 				n_samples=n_samples,
+				n_folds=n_folds,
 				seed=trial * 5 + n_samples,
 			)
 
@@ -250,10 +228,12 @@ def plot_error_curves(
 if __name__ == "__main__":
 	sample_sizes = np.array([100, 200, 300, 400, 500])
 	n_trials = 100
+	n_folds = 5
 
 	standard_errors, dr_errors, standard_se, dr_se = run_error_experiment(
 		sample_sizes=sample_sizes,
-		n_trials=n_trials
+		n_trials=n_trials,
+		n_folds=n_folds
 	)
 
 	fig, ax = plot_error_curves(
