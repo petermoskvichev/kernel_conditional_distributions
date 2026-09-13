@@ -818,9 +818,12 @@ class Test_Same_Marginal(Algorithm):
         kernel_y: Callable | None = None,
         algo_kwargs: dict | None = None,
         stat_kwargs: dict | None = None
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float] | Tuple[float, float, np.ndarray]:
         """
         Kernel two-sample test for conditional distribution (P_X = Q_X).
+
+        Set algo_kwargs["return_bootstrap"] to True to also return the
+        resampled statistics as a third result. The default returns two values.
         """
         if kernel_y is None:
             kernel_y = kernel_x
@@ -878,10 +881,13 @@ class Test_Same_Marginal(Algorithm):
                 **stat_kwargs,
             )
 
-        p_value = (1.0 + np.sum(stats_boot > stat)) / (1.0 + B)
+        p_value = (1.0 + np.sum(stats_boot >= stat)) / (1.0 + B)
 
         # Decision is p_value < alpha (not returned, but computed for callers)
         _ = p_value < alpha
+
+        if algo_kwargs.get("return_bootstrap", False):
+            return float(stat), float(p_value), stats_boot
 
         return float(stat), float(p_value)
 
