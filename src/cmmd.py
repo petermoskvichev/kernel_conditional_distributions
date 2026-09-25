@@ -750,6 +750,67 @@ class CMMDs(TestStatistic):
 
         return float(cmmd)
 
+class CMMD_rho(TestStatistic):
+    """CMMD_s with reference covariance rho C_P + (1-rho) C_Q.
+
+    The statistic is Tr(Delta* Delta C_R**s), with uncentered empirical
+    covariances C_P and C_Q normalized by their own sample sizes.
+    Setting rho=n/(n+m) recovers the pooled CMMDs estimator.
+    """
+
+    def __init__(self, rho: float = 0.5, s: float = 1.0):
+        if not np.isfinite(rho) or not 0 < rho < 1:
+            raise ValueError("rho must lie strictly between 0 and 1")
+        if not np.isfinite(s) or s < 0:
+            raise ValueError("s must be finite and nonnegative")
+        self.rho = float(rho)
+        self.s = float(s)
+
+    def compute(
+        self,
+        X_P: np.ndarray,
+        Y: np.ndarray,
+        X_Q: np.ndarray,
+        Z: np.ndarray,
+        lam_p: float,
+        lam_q: float,
+        kernel_x: Callable,
+        kernel_y: Callable | None = None,
+        **kwargs,
+    ) -> float:
+        if kernel_y is None:
+            kernel_y = kernel_x
+        n, m = X_P.shape[0], X_Q.shape[0]
+        if n == 0 or m == 0:
+            raise ValueError("Both samples must be nonempty")
+        X_tilde = np.vstack([X_P, X_Q])
+        K = kernel_x(X_tilde, X_tilde, **kwargs)
+        L_YY, L_ZZ, L_YZ = _compute_yz_kernels(Y, Z, kernel_y, **kwargs)
+        W_p, W_q = _compute_w_matrices(K[:n, :n], K[n:, n:], lam_p, lam_q)
+
+        # For pooled feature columns Phi and D=diag(rho/n, (1-rho)/m),
+        # S = Phi* C_R**s Phi = D**(-1/2) (D**(1/2) K D**(1/2))**(s+1) D**(-1/2).
+        weights = np.concatenate([np.full(n, self.rho / n),
+                                  np.full(m, (1 - self.rho) / m)])
+        if self.s == 0:
+            S = K
+        elif self.s == 1:
+            S = (K * weights) @ K
+        elif self.s == 2:
+            KD = K * weights
+            S = KD @ KD @ K
+        else:
+            root = np.sqrt(weights)
+            weighted_gram = root[:, None] * K * root[None, :]
+            S = _psd_matrix_power(weighted_gram, self.s + 1)
+            S = S / root[:, None] / root[None, :]
+
+        term_p = np.einsum("ij,ji->", W_p @ L_YY @ W_p, S[:n, :n])
+        cross = np.einsum("ij,ji->", W_p @ L_YZ @ W_q, S[n:, :n])
+        term_q = np.einsum("ij,ji->", W_q @ L_ZZ @ W_q, S[n:, n:])
+        return float(term_p - 2 * cross + term_q)
+
+
 class Algorithm(ABC):
     """
     Abstract base class for hypothesis testing algorithms.
