@@ -1183,14 +1183,15 @@ class Test_Diff_Marginal(Algorithm):
 
         for b in range(B):
 
-            labels_p = labels_boot[b]
-            labels_q = ~labels_p
+            # Shuffle within groups so CV folds do not retain original P/Q blocks.
+            indices_p = rng.permutation(np.flatnonzero(labels_boot[b]))
+            indices_q = rng.permutation(np.flatnonzero(~labels_boot[b]))
 
-            X_P_b = X_all[labels_p]
-            Y_b = W_all[labels_p]
+            X_P_b = X_all[indices_p]
+            Y_b = W_all[indices_p]
 
-            X_Q_b = X_all[labels_q]
-            Z_b = W_all[labels_q]
+            X_Q_b = X_all[indices_q]
+            Z_b = W_all[indices_q]
 
             stats_boot[b] = test_statistic.compute(
                 X_P_b,
