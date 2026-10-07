@@ -1,41 +1,53 @@
 # Measuring Differences between Conditional Distributions using Kernel Embeddings
 
-## Experiments Overview
+Research code for comparing conditional distributions using conditional maximum mean discrepancy (CMMD), including tests with equal or unequal covariate marginals, different CMMD levels, and doubly robust estimators.
 
-The experiments are designed to validate the CMMD framework across controlled synthetic settings and a real-data benchmark.
+Core statistics and tests are in `src/cmmd.py`, cross-fitted doubly robust estimators in `src/dr_cmmd.py`, and kernels and data generators in the other `src/` modules. Experiment scripts are in `experiments/`.
 
-- Synthetic conditional-shift experiments (`experiments/synthetic_plot_data.py`, `experiments/synthetic_plot_error_rate.py`, `experiments/synthetic_plot_test_stat.py`, `experiments/synthetic_power_plot.py`, `experiments/synthetic_dimension.py`) plots data samples, evaluate Type I error, power, and statistic behavior for CMMD$_0$, CMMD$_1$, and CMMD$_2$ under both equal and unequal covariate marginals. These scripts also study sensitivity to signal strength (`\theta`) and input dimension.
-- Level comparisons (`experiments/lvls_cmmd.py`) evaluate the broader CMMD$_s$ family (including intermediate levels such as $s=0.5,1.5,2.5$) to illustrate how the smoothing level changes test power.
-- Doubly robust experiments (`experiments/dr_cme.py`, `experiments/dr_cmmd.py`, `experiments/dr_cmmd_error.py`, `experiments/dr_cmmd_rejection_rate.py`) compare standard and doubly robust estimators, including estimation-error curves and rejection-rate behavior under null and alternative settings.
-- MNIST experiments (`experiments/mnist_error_rate.py`, with preprocessing in `src/clean_mnist.py`) treat digit label as the covariate and image representation as the conditional outcome, testing whether CMMD detects conditional changes under covariate shift.
+## Setup
 
-Generated figures are saved under `figs/`, and numeric outputs used for plotting are stored in `data/experiment_data/`.
+Use Python 3.12 (tested with Python 3.12.1 on macOS). From the repository root:
 
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-### Setting up a Virtual Environment
+On Windows, activate with `.venv\Scripts\activate.bat` (Command Prompt) or `.venv\Scripts\Activate.ps1` (PowerShell).
 
-It's recommended to use a virtual environment to avoid dependency conflicts:
+## Run experiments
 
-1. **Create a virtual environment**:
-   ```bash
-   python3 -m venv .venv
-   ```
+Start with a quick synthetic-data plot:
 
-2. **Activate the virtual environment**:
-   
-   On macOS/Linux:
-   ```bash
-   source .venv/bin/activate
-   ```
-   
-   On Windows:
-   ```bash
-   .venv\Scripts\activate
-   ```
-   
-   You should see `(.venv)` appear at the beginning of your command prompt.
+```bash
+python experiments/synthetic_plot_data.py
+```
 
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+This saves `figs/synthetic/data_plot_diff_marginal.pdf`. Run any script below in the same way.
+
+| Script in `experiments/` | Purpose |
+| --- | --- |
+| `synthetic_plot_data.py`, `synthetic_plot_test_stat.py` | Synthetic samples and statistic distributions |
+| `synthetic_plot_error_rate.py` | Type I error and power versus sample size |
+| `synthetic_power_plot.py`, `synthetic_dimension.py` | Power versus covariate mean and dimension, including sample-split CMMD level selection |
+| `synthetic_mixture_rho.py`, `synthetic_mixture_prop.py` | Power versus reference mixture weight and sample allocation |
+| `lvls_cmmd.py` | Power comparisons across CMMD levels |
+| `dr_cme.py`, `dr_cmmd.py` | Standard and doubly robust embedding/statistic estimates |
+| `dr_cmmd_error.py`, `dr_cmmd_rejection_rate.py` | Estimation error and rejection rates for doubly robust CMMD |
+| `mnist_error_rate.py` | Type I error and power on MNIST under covariate shift |
+
+Settings are defined inside each script, usually in the final `__main__` block; there are no command-line options. Adjust sample sizes, `n_trials` (repeated trials), and `B` (resamples) for shorter runs. In error-rate scripts, `error="type1"` measures Type I error and `error="type2"` measures power. Change `setting` where available to run the other scenarios.
+
+Scripts save PDFs under `figs/{synthetic,lvls,dr,mnist}/` and print numerical summaries to the terminal. 
+
+## MNIST data
+
+Download and decompress the MNIST test files [t10k-images-idx3-ubyte.gz](https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz) and [t10k-labels-idx1-ubyte.gz](https://storage.googleapis.com/cvdf-datasets/mnist/t10k-labels-idx1-ubyte.gz) into `data/raw_mnist/`, removing the `.gz` extension (data are not included in the repository), then run:
+
+```bash
+python src/clean_mnist.py
+python experiments/mnist_error_rate.py
+```
+
+Preprocessing normalizes the images and reduces them to 100 PCA components, saving `data/clean_mnist/mnist_test.csv`. The experiment uses digit labels as covariates and these components as outcomes.
