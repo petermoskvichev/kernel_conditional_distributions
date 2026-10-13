@@ -1,7 +1,7 @@
 """
 Estimate power curves for CMMD tests over alternative strength parameters.
 Uses same-marginal synthetic data with varying covariate mean shift.
-Includes CMMDs with its level selected on a separate sample.
+Includes CMMDs with its level selected on a separate sample and random baseline.
 """
 
 import numpy as np
@@ -64,6 +64,7 @@ def run_power_experiment(
 	rng = np.random.default_rng(seed)
 	# A separate stream keeps the original full-sample comparisons reproducible.
 	rng_select = np.random.default_rng(np.random.SeedSequence([seed+1, 1]))
+	rng_random = np.random.default_rng(np.random.SeedSequence([seed+1, 2]))
 
 	n = sample_size
 
@@ -71,6 +72,7 @@ def run_power_experiment(
 	results_cmmd1 = np.zeros(len(thetas))
 	results_cmmd2 = np.zeros(len(thetas))
 	results_cmmds = np.zeros(len(thetas))
+	results_cmmds_rand = np.zeros(len(thetas))
 
 	for i, theta in enumerate(thetas):
 		# print current theta
@@ -80,6 +82,7 @@ def run_power_experiment(
 		reject1 = 0
 		reject2 = 0
 		rejects = 0
+		rejects_rand = 0
 
 		for trial in range(n_trials):
 			seed_y = int(rng.integers(1, 2**31))
@@ -166,10 +169,21 @@ def run_power_experiment(
 				stat_kwargs=selection_kwargs,
 			)
 
+			# Randomly choose s value
+			s_rand = rng_random.choice(cmmd_levels)
+			_, ps_rand = algo.test(
+				X_P[inf_p], Y[inf_p], X_Q[inf_q], Z[inf_q],
+				CMMDs(level=s_rand),
+				gaussian_kernel,
+				algo_kwargs={**algo_kwargs, "random_state": seed_inference},
+				stat_kwargs=selection_kwargs,
+			)
+
 			reject0 += int(p0 < alpha)
 			reject1 += int(p1 < alpha)
 			reject2 += int(p2 < alpha)
 			rejects += int(ps < alpha)
+			rejects_rand += int(ps_rand < alpha)
 
 			# print every 50th trial for progress
 			if (trial + 1) % 50 == 0:
@@ -183,6 +197,7 @@ def run_power_experiment(
 		results_cmmd1[i] = reject1 / n_trials
 		results_cmmd2[i] = reject2 / n_trials
 		results_cmmds[i] = rejects / n_trials
+		results_cmmds_rand[i] = rejects_rand / n_trials
 
 		# print power for current theta
 		print(
@@ -190,7 +205,8 @@ def run_power_experiment(
 			f"CMMD0 = {results_cmmd0[i]:.3f}, "
 			f"CMMD1 = {results_cmmd1[i]:.3f}, "
 			f"CMMD2 = {results_cmmd2[i]:.3f}, "
-			f"CMMDs = {results_cmmds[i]:.3f}"
+			f"CMMDs = {results_cmmds[i]:.3f}, "
+			f"CMMDs_rand = {results_cmmds_rand[i]:.3f}"
 		)
 
 	return {
@@ -198,6 +214,7 @@ def run_power_experiment(
 		"cmmd1": results_cmmd1,
 		"cmmd2": results_cmmd2,
 		"cmmds": results_cmmds,
+		"cmmds_rand": results_cmmds_rand,
 	}
 
 
@@ -214,6 +231,7 @@ def plot_power_vs_theta(
 	ax.plot(thetas, results["cmmd1"], marker="s", label="CMMD$_1$")
 	ax.plot(thetas, results["cmmd2"], marker="^", label="CMMD$_2$")
 	ax.plot(thetas, results["cmmds"], marker="*", linestyle="--", label="CMMD$_{s^*}$")
+	ax.plot(thetas, results["cmmds_rand"], marker="x", linestyle="--", label="CMMD$_{s_{rand}}$", color="gray")
 
 	ax.set_title("Power Curve", fontsize=24)
 	ax.set_xlabel("Covariate mean ($\\theta$)", fontsize=20)

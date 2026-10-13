@@ -1,7 +1,7 @@
 """
 Measure how CMMD test power changes with covariate dimension.
 Constructs multivariate synthetic data with controlled noise growth by coordinate.
-Includes CMMDs with its level selected on a separate sample.
+Includes CMMDs with its level selected on a separate sample and random baseline.
 """
 
 import numpy as np
@@ -98,11 +98,13 @@ def run_dimension_power_experiment(
 	rng = np.random.default_rng(seed)
 	# A separate stream keeps the original full-sample comparisons reproducible.
 	rng_select = np.random.default_rng(np.random.SeedSequence([seed, 1]))
+	rng_random = np.random.default_rng(np.random.SeedSequence([seed, 2]))
 
 	results_cmmd0 = np.zeros(len(dimensions))
 	results_cmmd1 = np.zeros(len(dimensions))
 	results_cmmd2 = np.zeros(len(dimensions))
 	results_cmmds = np.zeros(len(dimensions))
+	results_cmmds_rand = np.zeros(len(dimensions))
 
 	for i, d in enumerate(dimensions):
 		print(f"Running dimension experiment for d={d:d}")
@@ -111,6 +113,7 @@ def run_dimension_power_experiment(
 		reject1 = 0
 		reject2 = 0
 		rejects = 0
+		rejects_rand = 0
 
 		# Calibrate bandwidth for the current dimension
 		X_cols = []
@@ -219,10 +222,21 @@ def run_dimension_power_experiment(
 				stat_kwargs=selection_kwargs,
 			)
 
+			# Randomly choose s value
+			s_rand = rng_random.choice(cmmd_levels)
+			_, ps_rand = algo.test(
+				X_P[inf_p], Y[inf_p], X_Q[inf_q], Z[inf_q],
+				CMMDs(level=s_rand),
+				gaussian_kernel,
+				algo_kwargs={**algo_kwargs, "random_state": seed_inference},
+				stat_kwargs=selection_kwargs,
+			)
+
 			reject0 += int(p0 < alpha)
 			reject1 += int(p1 < alpha)
 			reject2 += int(p2 < alpha)
 			rejects += int(ps < alpha)
+			rejects_rand += int(ps_rand < alpha)
 
 			if (trial + 1) % 50 == 0:
 				print(
@@ -235,13 +249,15 @@ def run_dimension_power_experiment(
 		results_cmmd1[i] = reject1 / n_trials
 		results_cmmd2[i] = reject2 / n_trials
 		results_cmmds[i] = rejects / n_trials
-
+		results_cmmds_rand[i] = rejects_rand / n_trials
+		
 		print(
 			f"Power for d={d:d}: "
 			f"CMMD0 = {results_cmmd0[i]:.3f}, "
 			f"CMMD1 = {results_cmmd1[i]:.3f}, "
 			f"CMMD2 = {results_cmmd2[i]:.3f}, "
-			f"CMMDs = {results_cmmds[i]:.3f}"
+			f"CMMDs = {results_cmmds[i]:.3f}, "
+			f"CMMDs_rand = {results_cmmds_rand[i]:.3f}"
 		)
 
 	return {
@@ -249,6 +265,7 @@ def run_dimension_power_experiment(
 		"cmmd1": results_cmmd1,
 		"cmmd2": results_cmmd2,
 		"cmmds": results_cmmds,
+		"cmmds_rand": results_cmmds_rand,
 	}
 
 
@@ -265,6 +282,7 @@ def plot_power_vs_dimension(
 	ax.plot(dimensions, results["cmmd1"], marker="s", label="CMMD$_1$")
 	ax.plot(dimensions, results["cmmd2"], marker="^", label="CMMD$_2$")
 	ax.plot(dimensions, results["cmmds"], marker="*", linestyle="--", label="CMMD$_{s^*}$")
+	ax.plot(dimensions, results["cmmds_rand"], marker="x", linestyle="--", label="CMMD$_{s^{rand}}$", color="grey")
 
 	ax.set_title("Power Decay", fontsize=24)
 	ax.set_xlabel("Dimension ($D$)", fontsize=20)
